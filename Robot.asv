@@ -128,8 +128,8 @@ classdef Robot < handle
             if obj.isNavigating
                 obj.isNavigating = false;
                 % Stop the robot until we calculate new path
-                obj.controller.sendVelocityCommand(0, 0);
-                stop(obj.controlTimer);
+                %obj.controller.sendVelocityCommand(0, 0);
+                %stop(obj.controlTimer);
             end
             % Start navigation to new goal
             obj.navigate(newGoal);
@@ -216,9 +216,9 @@ classdef Robot < handle
         
         function obj = controlLoop(obj)
             % This function runs at the timer frequency
-            %if ~obj.isNavigating
-            %    return
-            %end
+            if ~obj.isNavigating
+                return
+            end
             
             try
                 % Get latest pose

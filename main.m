@@ -26,7 +26,7 @@ origin = yamlData.origin;
 % show(map);
 % title('Ground Truth Occupancy Map');
 
-clear explorer  % Delete existing explorer object
+%clear explorer  % Delete existing explorer object
 %delete(ros2("Node","robot_explorer")); % Clean up any lingering nodes
 %delete(ros2("Node","ground_truth"));
 
@@ -64,3 +64,27 @@ robot = Robot(map);
 % Set goal and start navigation
 goal = [10, 33];  % Example goal position
 robot.navigate(goal);
+
+disp('Robot is running. Send goals through ROS2 topic /goal_pose');
+disp('Press Enter to quit and cleanup timers...');
+
+% Wait for Enter key
+input('');
+disp('Cleaning up...');
+% Stop all timers
+if ~isempty(robot.controlTimer) && isvalid(robot.controlTimer)
+    stop(robot.controlTimer);
+    delete(robot.controlTimer);
+end
+if ~isempty(robot.poseTimer) && isvalid(robot.poseTimer)
+    stop(robot.poseTimer);
+    delete(robot.poseTimer);
+end
+if ~isempty(robot.ekf.timer) && isvalid(robot.ekf.timer)
+    stop(robot.ekf.timer);
+    delete(robot.ekf.timer);
+end
+% Delete the robot object
+delete(robot);
+
+disp('Script terminated cleanly.');
