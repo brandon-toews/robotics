@@ -1,0 +1,409 @@
+classdef Robot < handle
+    properties
+        fullMap
+        robotMap
+        currentPose
+        goal
+        currentPath
+        node
+        lidarSub
+        ekf
+        planner
+        controller
+        robotMapPub
+        currentPosePub
+        % Path publisher
+        pathPub
+        resolution
+        controlTimer    % Timer for real-time control
+        isNavigating   % Flag to track navigation state
+        poseTimer
+        goalSub
+    end
+    methods
+        function obj = Robot(map)
+            mapSize = map.GridSize;
+            obj.resolution = 1/map.Resolution;
+            obj.node = ros2node('robot_explorer');
+             % Print input parameters
+            disp('Creating RobotExplorer:');
+            disp(['Map size (pixels): ' num2str(mapSize)]);
+            disp(['Resolution (meters/pixel): ' num2str(obj.resolution)]);
+            
+            % Calculate map dimensions in meters
+            map_width_meters = mapSize(1) * obj.resolution;
+            map_height_meters = mapSize(2) * obj.resolution;
+            disp(['Map dimensions (meters): ' num2str([map_width_meters, map_height_meters])]);
+            
+            % Initialize with zeros
+            unknownMap = zeros(mapSize(1), mapSize(2));
+            
+
+            % Initialize dynamic map (same size and resolution as ground truth)
+            obj.robotMap = occupancyMap(unknownMap, 1/obj.resolution);
+
+            % Publisher for dynamic map
+            obj.robotMapPub = ros2publisher(obj.node, '/updated_map', 'nav_msgs/OccupancyGrid');
+            
+            % Print actual map dimensions to verify
+            [map_height, map_width] = size(obj.robotMap.occupancyMatrix);
+            disp(['Actual map dimensions (cells): ' num2str([map_height, map_width])]);
+            
+            obj.planner = plannerAStarGrid(obj.robotMap);
+            obj.controller = DiffDrivePathController(obj.node);
+            timeStep = 0.1;
+            obj.ekf = SensorFusionEKF(5.975, 16.975, timeStep);  % Initialize sensor fusion EKF
+            obj.ekf.start();
+            % Get current state from EKF using getState()
+            obj.currentPose = obj.ekf.getState();
+
+            obj.currentPosePub = ros2publisher(obj.node, '/robot_pose', 'geometry_msgs/PoseStamped');
+            %obj.lidarSub = ros2subscriber(obj.node, '/front_2d_lidar/scan', @obj.lidarCallback);
+            
+            % Lidar Subscriber
+            obj.lidarSub = ros2subscriber(obj.node, '/front_2d_lidar/scan', 'sensor_msgs/LaserScan');
+
+            % Subscribe to pose updates from sensor fusion
+            addlistener(obj.ekf, 'PoseUpdated', @(~, ~)obj.updateMap());
+
+            % In RobotExplorer constructor
+            obj.goalSub = ros2subscriber(obj.node, '/goal_pose', 'geometry_msgs/PoseStamped', @obj.goalCallback);
+            
+            % Path publisher
+            obj.pathPub = ros2publisher(obj.node, '/planned_path', 'nav_msgs/Path');
+
+            % Clean up any existing timers
+            %delete(timerfindall);
+
+            % Create control timer (50 Hz)
+            obj.controlTimer = timer('ExecutionMode', 'fixedRate', ...
+                                   'Period', 0.02, ...  % 50 Hz
+                                   'TimerFcn', @(~,~)obj.controlLoop());
+            obj.isNavigating = false;
+
+           
+            obj.poseTimer = timer('ExecutionMode', 'fixedRate', ...
+                                 'Period', 1.0, ...
+                                 'TimerFcn', @(~,~)obj.publishPose());
+            start(obj.poseTimer);
+
+            
+    
+        end
+        function publishPose(obj)
+            if isempty(obj.currentPose)
+                return;
+            end
+            try
+                % Create and populate PoseStamped message
+                poseMsg = ros2message('geometry_msgs/PoseStamped');
+                
+                % Set header
+                poseMsg.header.frame_id = 'map';
+                poseMsg.header.stamp = ros2time(obj.node,'now');
+               
+                % Set position
+                poseMsg.pose.position.x = (obj.robotMap.GridSize(1)*obj.resolution)-obj.currentPose(2);
+                poseMsg.pose.position.y = obj.currentPose(1);
+                poseMsg.pose.position.z = 0;
+                
+                % Convert theta to quaternion (rotate by -pi/2 to align with ROS convention)
+                quat = eul2quat([obj.currentPose(3) + pi/2, 0, 0]);
+                poseMsg.pose.orientation.w = quat(1);
+                poseMsg.pose.orientation.x = quat(2);
+                poseMsg.pose.orientation.y = quat(3);
+                poseMsg.pose.orientation.z = quat(4);
+                  
+                % Publish pose
+                send(obj.currentPosePub, poseMsg);
+            catch e
+                disp(['Error message: ', e.message]);
+            end
+        end
+        function goalCallback(obj, msg)
+            newGoal = [msg.pose.position.y, (obj.robotMap.GridSize(1)*obj.resolution)-msg.pose.position.x];
+            disp('Selected Nav Goal:')
+            disp(newGoal);
+            % Stop current navigation if running
+            if obj.isNavigating
+                obj.isNavigating = false;
+                % Stop the robot until we calculate new path
+                %obj.controller.sendVelocityCommand(0, 0);
+                %stop(obj.controlTimer);
+            end
+            % Start navigation to new goal
+            obj.navigate(newGoal);
+        end
+        function obj = updateMap(obj)
+            % Lidar insertion callback triggered by pose update
+            msg = receive(obj.lidarSub, 1); % Grab latest lidar scan
+
+            if ~isempty(msg)
+                % Clean up ranges - replace invalid values (negative or inf) with max range
+                ranges = double(msg.ranges);
+                maxRange = double(msg.range_max);
+                
+                % Replace negative values and inf with max range
+                ranges(ranges < 0.2 | isinf(ranges)) = maxRange;
+                
+                % Generate angle array
+                angles = linspace(msg.angle_min, msg.angle_max, length(ranges));
+                
+                % Create lidarScan object with cleaned ranges
+                cleanedScan = lidarScan(ranges, angles);
+    
+                % Get current state from EKF using getState()
+                obj.currentPose = obj.ekf.getState();
+                robotX = obj.currentPose(1);
+                robotY = obj.currentPose(2);
+                robotTheta = obj.currentPose(3);
+
+                %disp('map origin')
+                %disp(mapOrigin)
+                globalPose = [robotX, robotY, robotTheta];  % Transform to map frame
+    
+                %disp('Global Pose')
+                %disp(globalPose)
+                % Insert LIDAR data using the transformed pose
+                
+                % Transform scan to match coordinate system
+                transformedScan = transformScan(cleanedScan, [0, 0, pi]); % Rotate 180°
+    
+                try
+                    insertRay(obj.robotMap, globalPose, transformedScan, maxRange);
+                    testmsg = ros2message('nav_msgs/OccupancyGrid');
+                    testmsg.header.frame_id = 'map';
+                    testmsg.info.width = uint32(obj.robotMap.GridSize(1));
+                    testmsg.info.height = uint32(obj.robotMap.GridSize(2));
+                    testmsg.info.resolution = single(1/obj.robotMap.Resolution);
+                    
+                    % Flatten occupancy data (1D array required for ROS)
+                    testmsg.data = int8(reshape(occupancyMatrix(obj.robotMap)*100, [], 1));
+                    
+                    % Publish the map
+                    send(obj.robotMapPub, testmsg);
+                catch e
+                    disp('Error in insertRay:');
+                    disp(['Position: [', num2str(globalPose), ']']);
+                    disp(['Error message: ', e.message]);
+                end
+            end
+        end
+        
+        function obj = navigate(obj, goal)
+            obj.goal = goal;
+            disp('Planning initial path...');
+            obj.currentPath = obj.planPath();
+            disp(['Path has ', num2str(size(obj.currentPath, 1)), ' waypoints']);
+            obj.controller.resetPath();
+            
+            % Start real-time control
+            obj.isNavigating = true;
+
+          
+            start(obj.controlTimer);
+            
+            % Wait for navigation to complete
+            while obj.isNavigating
+                pause(0.1);  % Just for checking completion
+            end
+            
+            % Stop the robot
+            obj.controller.sendVelocityCommand(0, 0);
+            stop(obj.controlTimer);
+        end
+        
+        function obj = controlLoop(obj)
+            % This function runs at the timer frequency
+            if ~obj.isNavigating
+                return
+            end
+            
+            try
+                % Get latest pose
+                % obj.currentPose = obj.ekf.getState();
+                
+                % Check if we've reached the goal
+                if obj.reachedGoal()
+                    disp('Reached Goal!')
+                    obj.isNavigating = false;
+                    obj.controller.sendVelocityCommand(0, 0);
+                    return
+                end
+                
+                % Check for replanning (maybe do this less frequently)
+                if obj.needsReplanning()
+                    disp('Replanning path...');
+                    obj.currentPath = obj.planPath();
+                end
+                
+                % Compute and send velocity commands
+                [v, omega] = obj.controller.computeVelocityCommands(obj.currentPose, obj.currentPath);
+                obj.controller.sendVelocityCommand(v, omega);
+                
+            catch e
+                disp('Error in control loop:');
+                disp(e.message);
+                obj.isNavigating = false;
+                obj.controller.sendVelocityCommand(0, 0);
+            end
+        end
+        
+        function delete(obj)
+            % Cleanup when object is destroyed
+            if ~isempty(obj.controlTimer) && isvalid(obj.controlTimer)
+                stop(obj.controlTimer);
+                delete(obj.controlTimer);
+            end
+        end
+        function cells = discretizePath(obj, path)
+            % Convert continuous path points to discrete map cells
+            % Ensures we check all cells the path passes through
+            
+            cells = [];
+            for i = 1:size(path,1)-1
+                % Get points for current path segment
+                start = path(i,:);
+                finish = path(i+1,:);
+                %disp(start);
+                %disp(finish);
+                
+                % Use MATLAB's built-in raycast for cell interpolation
+                % segmentCells = raycast(obj.robotMap, start, finish);
+                % startCell = world2grid(obj.robotMap, start);
+                % finishCell = world2grid(obj.robotMap, finish);
+                % disp('First cell:');
+                % disp(startCell);
+                % disp('Second cell:');
+                % disp(finishCell);
+                segmentCells = raycast(obj.robotMap, start, finish);
+
+                cells = [cells; segmentCells];
+            end
+            
+            % Remove duplicates
+            cells = unique(cells, 'rows');
+        end
+
+        
+        function path = planPath(obj)
+
+            %mapOrigin = obj.robotMap.GridLocationInWorld;
+            %disp(['Map origin in world coordinates: ', num2str(mapOrigin)]);
+            
+            % Debug prints
+            disp('Current pose format:');
+            disp(obj.currentPose);
+            disp('Goal format:');
+            disp(obj.goal);
+            
+            % Ensure we have 1x2 vectors for world2grid
+            startPos = [obj.currentPose(1), obj.currentPose(2)];  % Extract x,y as 1x2
+            goalPos = [obj.goal(1), obj.goal(2)];  % Extract x,y as 1x2
+
+            % Add after your current debug prints
+            %obj.debugGridConversion('Start', startPos(1), startPos(2));
+            %obj.debugGridConversion('Goal', goalPos(1), goalPos(2));
+
+            disp('Start position for world2grid:');
+            disp(startPos);
+            disp('Goal position for world2grid:');
+            disp(goalPos);
+            
+            % Convert to grid coordinates
+            tic;
+            start = obj.robotMap.world2grid(startPos);
+            convTime = toc;
+            disp(['World2grid conversion took: ', num2str(convTime), ' seconds']);
+            finish = obj.robotMap.world2grid(goalPos);
+
+            disp('Start position in grid postion:');
+            disp(start);
+            disp('Goal position in grid postion:');
+            disp(finish);
+            
+            % Get path from planner
+            gridPath = plan(obj.planner, start, finish);
+            
+            % Convert grid path to world coordinates
+            worldPath = obj.robotMap.grid2world(gridPath);
+
+            % Print detailed path information
+            % disp('Planned path in world coordinates:');
+            % disp('Format: [x, y]');
+            % for i = 1:size(worldPath, 1)
+            %     disp(['Point ', num2str(i), ': [', num2str(worldPath(i,1), '%.2f'), ', ', num2str(worldPath(i,2), '%.2f'), ']']);
+            % end
+            show(obj.planner)
+            convert2Grid = obj.robotMap.GridSize(1)*obj.resolution;
+            % Create Path message
+            pathMsg = ros2message('nav_msgs/Path');
+            pathMsg.header.frame_id = 'map';
+            pathMsg.header.stamp = ros2time(obj.node,'now');
+            
+            % Populate poses array
+            for i = 1:size(worldPath, 1)
+                pose = ros2message('geometry_msgs/PoseStamped');
+                pose.header.frame_id = 'map';
+                pose.header.stamp = ros2time(obj.node,'now');
+                
+                % Set position
+                pose.pose.position.x = convert2Grid - worldPath(i, 2);
+                pose.pose.position.y = worldPath(i, 1);
+                pose.pose.position.z = 0.0;
+                
+                % If not the last point, calculate orientation towards next point
+                % if i < size(worldPath, 1)
+                %     dx = worldPath(i+1, 1) - worldPath(i, 1);
+                %     dy = worldPath(i+1, 2) - worldPath(i, 2);
+                %     theta = atan2(dy, dx);
+                % 
+                %     % Convert to quaternion
+                %     quat = eul2quat([theta, 0, 0]);
+                %     pose.pose.orientation.w = quat(1);
+                %     pose.pose.orientation.x = quat(2);
+                %     pose.pose.orientation.y = quat(3);
+                %     pose.pose.orientation.z = quat(4);
+                % else
+                %     % For last point, use final orientation
+                %     quat = eul2quat([obj.currentPose(3), 0, 0]);
+                %     pose.pose.orientation.w = quat(1);
+                %     pose.pose.orientation.x = quat(2);
+                %     pose.pose.orientation.y = quat(3);
+                %     pose.pose.orientation.z = quat(4);
+                % end
+                
+                pathMsg.poses(i) = pose;
+            end
+            
+            % Publish path
+            send(obj.pathPub, pathMsg);
+            
+            % Return the path in world coordinates
+            path = worldPath;
+        end
+        function replan = needsReplanning(obj)
+            if isempty(obj.currentPath)
+                replan = true;
+                return;
+            end
+            pathCells = obj.discretizePath(obj.currentPath);
+            occupiedCells = getOccupancy(obj.robotMap, pathCells) > 0.65;
+            replan = any(occupiedCells);
+        end
+        function reached = reachedGoal(obj)
+            if isempty(obj.currentPose) || isempty(obj.goal)
+                reached = false;
+                return;
+            end
+            %disp('current pos:');
+            %disp(obj.currentPose(1:2)');
+            %disp('Goal position');
+            %disp(obj.goal);
+            dist = norm(obj.currentPose(1:2)' - obj.goal);
+            %disp('Distance');
+            %disp(dist);
+            reached = dist < 0.2;
+        end
+    end
+end
