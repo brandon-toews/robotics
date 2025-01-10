@@ -8,7 +8,6 @@ classdef SensorFusionEKF < handle
         dt % Time step
         imuSub  % IMU subscriber
         odomSub % Odometry subscriber
-        groundTruthSub
         node    % ROS2 Node
         stateLog  % Logging for trajectory
         running % Boolean for starting and stopping sensor fusion
@@ -71,7 +70,6 @@ classdef SensorFusionEKF < handle
             % ROS2 Subscribers
             obj.imuSub = ros2subscriber(obj.node, '/chassis/imu', 'sensor_msgs/Imu');
             obj.odomSub = ros2subscriber(obj.node, '/chassis/odom', 'nav_msgs/Odometry');
-            %obj.groundTruthSub = ros2subscriber(obj.node, '/groundTruthPose', 'tf2_msgs/msg/TFMessage');
             %start(obj);
             % Create timer
             obj.timer = timer('ExecutionMode', 'fixedRate', ...
@@ -116,7 +114,6 @@ classdef SensorFusionEKF < handle
                 world_state = obj.x;
                 world_state(1) = world_pos(1);
                 world_state(2) = world_pos(2);
-                world_state(3) = obj.x(3); % Add 180 degrees (pi radians)
             end
         end
         
@@ -134,45 +131,131 @@ classdef SensorFusionEKF < handle
         
         % Method to perform sensor fusion
         function obj = run(obj)
-            odomMsg = receive(obj.odomSub, 10);
-            imuMsg = receive(obj.imuSub, 10);
-            %groundTruthMsg = receive(obj.groundTruthSub, 10);
+            try
+                odomMsg = receive(obj.odomSub, 1);
+                imuMsg = receive(obj.imuSub, 1);
+                if ~isempty(odomMsg) && ~isempty(imuMsg)
+                    % Extract odometry and IMU data
+                    odom_x = odomMsg.pose.pose.position.x;
+                    odom_y = odomMsg.pose.pose.position.y;
+                    odom_theta = quat2eul([odomMsg.pose.pose.orientation.w, ...
+                                  odomMsg.pose.pose.orientation.x, ...
+                                  odomMsg.pose.pose.orientation.y, ...
+                                  odomMsg.pose.pose.orientation.z], 'ZYX');
+                    odom_theta = odom_theta(1);
+                    
+                    imu_lin_acc = imuMsg.linear_acceleration.x;
+                    imu_ang_vel = imuMsg.angular_velocity.z;
+                    
+                    % Prediction step
+                    F = obj.compute_state_to_jacobian();
+                    obj.x = obj.state_transition();
+                    obj.P = F * obj.P * F' + obj.Q;
+                    
+                    % Measurement and update
+                    v_est = obj.x(4) + imu_lin_acc * obj.dt;
+                    z = [odom_x; odom_y; odom_theta; v_est; imu_ang_vel] + diag(obj.R) .* randn(5, 1);
+                    
+                    % Kalman Gain
+                    H = eye(5);
+                    K = obj.P * H' / (H * obj.P * H' + obj.R);
+                    obj.x = obj.x + K * (z - H * obj.x);
+                    obj.P = (eye(5) - K * H) * obj.P;
+        
+                    % Debug prints
+                    %disp('EKF Current pose:');
+                    %disp(obj.getState);
+        
+                    % Trigger PoseUpdated event
+                    % notify(obj, 'PoseUpdated');
+                end
+                
+            catch e
+                disp('Error in EKF run:');
+                disp(e.message);
+            end
+        end
+        function delete(obj)
+            disp('Cleaning up Sensor Fusion object...');
             
-            % Extract odometry and IMU data
-            odom_x = odomMsg.pose.pose.position.x;
-            odom_y = odomMsg.pose.pose.position.y;
-            odom_theta = quat2eul([odomMsg.pose.pose.orientation.w, ...
-                          odomMsg.pose.pose.orientation.x, ...
-                          odomMsg.pose.pose.orientation.y, ...
-                          odomMsg.pose.pose.orientation.z], 'ZYX');
-            odom_theta = odom_theta(1);
+            % Clean up timer
+            try
+                if ~isempty(obj.timer) && isvalid(obj.timer)
+                    stop(obj.timer);
+                    delete(obj.timer);
+                end
+            catch e
+                disp(e.message);
+            end
             
-            imu_lin_acc = imuMsg.linear_acceleration.x;
-            imu_ang_vel = imuMsg.angular_velocity.z;
-
-            %goundTruthX = groundTruthMsg.
+            % Clean up subscribers
+            if ~isempty(obj.imuSub)
+                clear obj.imuSub;
+            end
+            if ~isempty(obj.odomSub)
+                clear obj.odomSub;
+            end
+  
             
-            % Prediction step
-            F = obj.compute_state_to_jacobian();
-            obj.x = obj.state_transition();
-            obj.P = F * obj.P * F' + obj.Q;
+            % Clean up node last
+            if ~isempty(obj.node)
+                delete(obj.node);
+            end
             
-            % Measurement and update
-            v_est = obj.x(4) + imu_lin_acc * obj.dt;
-            z = [odom_x; odom_y; odom_theta; v_est; imu_ang_vel] + diag(obj.R) .* randn(5, 1);
-            
-            % Kalman Gain
-            H = eye(5);
-            K = obj.P * H' / (H * obj.P * H' + obj.R);
-            obj.x = obj.x + K * (z - H * obj.x);
-            obj.P = (eye(5) - K * H) * obj.P;
-
-            % Debug prints
-            %disp('EKF Current pose:');
-            %disp(obj.getState);
-
-            % Trigger PoseUpdated event
-            notify(obj, 'PoseUpdated');
+            disp('Sensor Fusion cleanup complete.');
         end
     end
 end
+        % % Method to perform sensor fusion
+        % function obj = run(obj)
+        %     odomMsg = receive(obj.odomSub, 10);
+        %     imuMsg = receive(obj.imuSub, 10);
+        %     %groundTruthMsg = receive(obj.groundTruthSub, 10);
+        % 
+        %     % Extract odometry and ground truth data
+        %     odom_x = odomMsg.pose.pose.position.x;
+        %     odom_y = odomMsg.pose.pose.position.y;
+        %     odom_theta = quat2eul([odomMsg.pose.pose.orientation.w, ...
+        %                            odomMsg.pose.pose.orientation.x, ...
+        %                            odomMsg.pose.pose.orientation.y, ...
+        %                            odomMsg.pose.pose.orientation.z], 'ZYX');
+        %     odom_theta = odom_theta(1);
+        % 
+        %     % groundTruthX = groundTruthMsg.transforms.transform.translation.x;
+        %     % groundTruthY = groundTruthMsg.transforms.transform.translation.y;
+        %     % groundTruthTheta = quat2eul([groundTruthMsg.transforms.transform.rotation.w, ...
+        %     %                              groundTruthMsg.transforms.transform.rotation.x, ...
+        %     %                              groundTruthMsg.transforms.transform.rotation.y, ...
+        %     %                              groundTruthMsg.transforms.transform.rotation.z], 'ZYX');
+        %     % groundTruthTheta = groundTruthTheta(1);
+        % 
+        %     % Log the data
+        %     %obj.odomLog = [obj.odomLog; odom_x, odom_y, odom_theta];
+        %     %obj.groundTruthLog = [obj.groundTruthLog; groundTruthX, groundTruthY, groundTruthTheta];
+        % 
+        %     imu_lin_acc = imuMsg.linear_acceleration.x;
+        %     imu_ang_vel = imuMsg.angular_velocity.z;
+        % 
+        % 
+        %     % Prediction step
+        %     F = obj.compute_state_to_jacobian();
+        %     obj.x = obj.state_transition();
+        %     obj.P = F * obj.P * F' + obj.Q;
+        % 
+        %     % Measurement and update
+        %     v_est = obj.x(4) + imu_lin_acc * obj.dt;
+        %     z = [odom_x; odom_y; odom_theta; v_est; imu_ang_vel] + diag(obj.R) .* randn(5, 1);
+        % 
+        %     % Kalman Gain
+        %     H = eye(5);
+        %     K = obj.P * H' / (H * obj.P * H' + obj.R);
+        %     obj.x = obj.x + K * (z - H * obj.x);
+        %     obj.P = (eye(5) - K * H) * obj.P;
+        % 
+        %     % Debug prints
+        %     %disp('EKF Current pose:');
+        %     %disp(obj.getState);
+        % 
+        %     % Trigger PoseUpdated event
+        %     notify(obj, 'PoseUpdated');
+        % end

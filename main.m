@@ -10,7 +10,8 @@ image = imread(pngFilename);
 grayImage = rgb2gray(image);
 bwMap = grayImage < (yamlData.occupied_thresh * 255);  % Threshold
 
-%imshow(bwMap);  % Visualize binary occupancy grid
+%imshow(bwMap);  % Visualize binary occupancy gr
+
 %title('Binary Occupancy Map');
 
 % Create occupancy map
@@ -71,20 +72,37 @@ disp('Press Enter to quit and cleanup timers...');
 % Wait for Enter key
 input('');
 disp('Cleaning up...');
-% Stop all timers
-if ~isempty(robot.controlTimer) && isvalid(robot.controlTimer)
-    stop(robot.controlTimer);
-    delete(robot.controlTimer);
-end
-if ~isempty(robot.poseTimer) && isvalid(robot.poseTimer)
-    stop(robot.poseTimer);
-    delete(robot.poseTimer);
-end
-if ~isempty(robot.ekf.timer) && isvalid(robot.ekf.timer)
-    stop(robot.ekf.timer);
-    delete(robot.ekf.timer);
-end
+% % Stop all timers
+% try
+%     if ~isempty(robot.controlTimer) && isvalid(robot.controlTimer)
+%     stop(robot.controlTimer);
+%     delete(robot.controlTimer);
+% 
+%     end
+% catch e
+%     disp(e.message);
+% end
+% try
+%     if ~isempty(robot.poseTimer) && isvalid(robot.poseTimer)
+%         stop(robot.poseTimer);
+%         delete(robot.poseTimer);
+%     end
+% catch e
+%     disp(e.message);
+% end
+% try
+%     if ~isempty(robot.ekf.timer) && isvalid(robot.ekf.timer)
+%         stop(robot.ekf.timer);
+%         delete(robot.ekf.timer);
+%         delete(robot.ekf.node)
+%     end
+% catch e
+%     disp(e.message);
+% end
+
 % Delete the robot object
 delete(robot);
+
+delete(node);
 
 disp('Script terminated cleanly.');

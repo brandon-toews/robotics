@@ -1,3 +1,4 @@
+
 classdef Robot < handle
     properties
         fullMap
@@ -6,7 +7,8 @@ classdef Robot < handle
         goal
         currentPath
         node
-        lidarSub
+        frontLidarSub
+        backLidarSub
         ekf
         planner
         controller
@@ -41,6 +43,7 @@ classdef Robot < handle
 
             % Initialize dynamic map (same size and resolution as ground truth)
             obj.robotMap = occupancyMap(unknownMap, 1/obj.resolution);
+            %inflate(obj.robotMap,3)
 
             % Publisher for dynamic map
             obj.robotMapPub = ros2publisher(obj.node, '/updated_map', 'nav_msgs/OccupancyGrid');
@@ -61,12 +64,13 @@ classdef Robot < handle
             %obj.lidarSub = ros2subscriber(obj.node, '/front_2d_lidar/scan', @obj.lidarCallback);
             
             % Lidar Subscriber
-            obj.lidarSub = ros2subscriber(obj.node, '/front_2d_lidar/scan', 'sensor_msgs/LaserScan');
+            %obj.frontLidarSub = ros2subscriber(obj.node, '/front_2d_lidar/scan', 'sensor_msgs/LaserScan');
+            obj.frontLidarSub = ros2subscriber(obj.node, '/front_2d_lidar/scan', 'sensor_msgs/LaserScan', @obj.lidarCallback);
+            %obj.backLidarSub = ros2subscriber(obj.node, '/back_2d_lidar/scan', 'sensor_msgs/LaserScan');
 
             % Subscribe to pose updates from sensor fusion
-            addlistener(obj.ekf, 'PoseUpdated', @(~, ~)obj.updateMap());
+            % addlistener(obj.ekf, 'PoseUpdated', @(~, ~)obj.updateMap());
 
-            % In RobotExplorer constructor
             obj.goalSub = ros2subscriber(obj.node, '/goal_pose', 'geometry_msgs/PoseStamped', @obj.goalCallback);
             
             % Path publisher
@@ -120,7 +124,7 @@ classdef Robot < handle
                 disp(['Error message: ', e.message]);
             end
         end
-        function goalCallback(obj, msg)
+        function obj = goalCallback(obj, msg)
             newGoal = [msg.pose.position.y, (obj.robotMap.GridSize(1)*obj.resolution)-msg.pose.position.x];
             disp('Selected Nav Goal:')
             disp(newGoal);
@@ -128,32 +132,31 @@ classdef Robot < handle
             if obj.isNavigating
                 obj.isNavigating = false;
                 % Stop the robot until we calculate new path
-                %obj.controller.sendVelocityCommand(0, 0);
-                %stop(obj.controlTimer);
+                obj.controller.sendVelocityCommand(0, 0);
+                stop(obj.controlTimer);
             end
             % Start navigation to new goal
             obj.navigate(newGoal);
         end
-        function obj = updateMap(obj)
-            % Lidar insertion callback triggered by pose update
-            msg = receive(obj.lidarSub, 1); % Grab latest lidar scan
-
-            if ~isempty(msg)
+        function obj = insertScans2Map(obj, scans, isFront)
+            if ~isempty(scans)
+                % Get current occupancy values
+                currentOccGrid = occupancyMatrix(obj.robotMap);
+                newMap = obj.robotMap.copy();
                 % Clean up ranges - replace invalid values (negative or inf) with max range
-                ranges = double(msg.ranges);
-                maxRange = double(msg.range_max);
+                ranges = double(scans.ranges);
+                maxRange = double(scans.range_max);
                 
                 % Replace negative values and inf with max range
                 ranges(ranges < 0.2 | isinf(ranges)) = maxRange;
                 
                 % Generate angle array
-                angles = linspace(msg.angle_min, msg.angle_max, length(ranges));
+                angles = linspace(scans.angle_min, scans.angle_max, length(ranges));
                 
                 % Create lidarScan object with cleaned ranges
                 cleanedScan = lidarScan(ranges, angles);
     
-                % Get current state from EKF using getState()
-                obj.currentPose = obj.ekf.getState();
+                
                 robotX = obj.currentPose(1);
                 robotY = obj.currentPose(2);
                 robotTheta = obj.currentPose(3);
@@ -165,30 +168,59 @@ classdef Robot < handle
                 %disp('Global Pose')
                 %disp(globalPose)
                 
-               
-                % Transform scan to match coordinate system
-                transformedScan = transformScan(cleanedScan, [0, 0, pi]); % Rotate 180°
+                if isFront
+                    % Transform scan to match coordinate system
+                    transformedScan = transformScan(cleanedScan, [0, 0, pi]); % Rotate 180°
+                else
+                    transformedScan = transformScan(cleanedScan, [0, 0, 0]);
+                end
     
                 try
                     % Insert LIDAR data using the transformed scan
-                    insertRay(obj.robotMap, globalPose, transformedScan, maxRange);
-                    testmsg = ros2message('nav_msgs/OccupancyGrid');
-                    testmsg.header.frame_id = 'map';
-                    testmsg.info.width = uint32(obj.robotMap.GridSize(1));
-                    testmsg.info.height = uint32(obj.robotMap.GridSize(2));
-                    testmsg.info.resolution = single(1/obj.robotMap.Resolution);
-                    
-                    % Flatten occupancy data (1D array required for ROS)
-                    testmsg.data = int8(reshape(occupancyMatrix(obj.robotMap)*100, [], 1));
-                    
-                    % Publish the map
-                    send(obj.robotMapPub, testmsg);
+                    insertRay(newMap, globalPose, transformedScan, maxRange);
+                    newOccGrid = occupancyMatrix(newMap);
+                    % Define the inflation radius (in cells)
+                    %inflationRadius = 2;
+
+                    % Create a structuring element (disk-shaped kernel)
+                    %se = strel('disk', inflationRadius);
+
+                    % Inflate the occupancy grid using imdilate
+                    %inflatedMatrix = imdilate(newOccGrid, se);
+
+                    % Merge front scan with current map
+                    currentOccGrid = max(currentOccGrid, newOccGrid);
+                    % Update the actual map
+                    setOccupancy(obj.robotMap, currentOccGrid);
                 catch e
                     disp('Error in insertRay:');
                     disp(['Position: [', num2str(globalPose), ']']);
                     disp(['Error message: ', e.message]);
                 end
             end
+        end
+        function lidarCallback(obj, msg)
+            % Lidar insertion callback triggered by pose update
+            %frontMsg = receive(obj.frontLidarSub, 0.01); % Grab latest lidar scan
+            %backMsg = receive(obj.backLidarSub, 1);
+            % if ~isempty(frontMsg)
+            % Get current state from EKF using getState()
+            obj.currentPose = obj.ekf.getState();
+            obj.insertScans2Map(msg, true);
+            %obj.insertScans2Map(backMsg, false);
+
+            testmsg = ros2message('nav_msgs/OccupancyGrid');
+            testmsg.header.frame_id = 'map';
+            testmsg.info.width = uint32(obj.robotMap.GridSize(1));
+            testmsg.info.height = uint32(obj.robotMap.GridSize(2));
+            testmsg.info.resolution = single(1/obj.robotMap.Resolution);
+            
+            % Flatten occupancy data (1D array required for ROS)
+            testmsg.data = int8(reshape(occupancyMatrix(obj.robotMap)*100, [], 1));
+            
+            % Publish the map
+            send(obj.robotMapPub, testmsg);
+            % end
         end
         
         function obj = navigate(obj, goal)
@@ -203,27 +235,12 @@ classdef Robot < handle
 
           
             start(obj.controlTimer);
-            
-            % Wait for navigation to complete
-            %while obj.isNavigating
-                %pause(0.1);  % Just for checking completion
-            %end
-            
-            % Stop the robot
-            %obj.controller.sendVelocityCommand(0, 0);
-            %stop(obj.controlTimer);
+           
         end
         
         function obj = controlLoop(obj)
-            % This function runs at the timer frequency
-            if ~obj.isNavigating
-                return
-            end
-            
-            try
-                % Get latest pose
-                % obj.currentPose = obj.ekf.getState();
-                
+         
+            try 
                 % Check if we've reached the goal
                 if obj.reachedGoal()
                     disp('Reached Goal!')
@@ -251,13 +268,6 @@ classdef Robot < handle
             end
         end
         
-        function delete(obj)
-            % Cleanup when object is destroyed
-            if ~isempty(obj.controlTimer) && isvalid(obj.controlTimer)
-                stop(obj.controlTimer);
-                delete(obj.controlTimer);
-            end
-        end
         function cells = discretizePath(obj, path)
             % Convert continuous path points to discrete map cells
             % Ensures we check all cells the path passes through
@@ -267,17 +277,10 @@ classdef Robot < handle
                 % Get points for current path segment
                 start = path(i,:);
                 finish = path(i+1,:);
-                %disp(start);
-                %disp(finish);
+                % disp(start);
+                % disp(finish);
                 
                 % Use MATLAB's built-in raycast for cell interpolation
-                % segmentCells = raycast(obj.robotMap, start, finish);
-                % startCell = world2grid(obj.robotMap, start);
-                % finishCell = world2grid(obj.robotMap, finish);
-                % disp('First cell:');
-                % disp(startCell);
-                % disp('Second cell:');
-                % disp(finishCell);
                 segmentCells = raycast(obj.robotMap, start, finish);
 
                 cells = [cells; segmentCells];
@@ -324,6 +327,7 @@ classdef Robot < handle
             disp('Goal position in grid postion:');
             disp(finish);
             
+            
             % Get path from planner
             gridPath = plan(obj.planner, start, finish);
             
@@ -336,7 +340,7 @@ classdef Robot < handle
             % for i = 1:size(worldPath, 1)
             %     disp(['Point ', num2str(i), ': [', num2str(worldPath(i,1), '%.2f'), ', ', num2str(worldPath(i,2), '%.2f'), ']']);
             % end
-            show(obj.planner)
+            % show(obj.planner)
             convert2Grid = obj.robotMap.GridSize(1)*obj.resolution;
             % Create Path message
             pathMsg = ros2message('nav_msgs/Path');
@@ -354,27 +358,6 @@ classdef Robot < handle
                 pose.pose.position.y = worldPath(i, 1);
                 pose.pose.position.z = 0.0;
                 
-                % If not the last point, calculate orientation towards next point
-                % if i < size(worldPath, 1)
-                %     dx = worldPath(i+1, 1) - worldPath(i, 1);
-                %     dy = worldPath(i+1, 2) - worldPath(i, 2);
-                %     theta = atan2(dy, dx);
-                % 
-                %     % Convert to quaternion
-                %     quat = eul2quat([theta, 0, 0]);
-                %     pose.pose.orientation.w = quat(1);
-                %     pose.pose.orientation.x = quat(2);
-                %     pose.pose.orientation.y = quat(3);
-                %     pose.pose.orientation.z = quat(4);
-                % else
-                %     % For last point, use final orientation
-                %     quat = eul2quat([obj.currentPose(3), 0, 0]);
-                %     pose.pose.orientation.w = quat(1);
-                %     pose.pose.orientation.x = quat(2);
-                %     pose.pose.orientation.y = quat(3);
-                %     pose.pose.orientation.z = quat(4);
-                % end
-                
                 pathMsg.poses(i) = pose;
             end
             
@@ -390,8 +373,15 @@ classdef Robot < handle
                 return;
             end
             pathCells = obj.discretizePath(obj.currentPath);
-            occupiedCells = getOccupancy(obj.robotMap, pathCells) > 0.65;
+            % inflatedMap = obj.robotMap.copy();
+            % inflate(inflatedMap,1)
+            % disp('Path cells:');
+            % disp(pathCells);
+            occupiedCells = getOccupancy(obj.robotMap, pathCells, "grid") > 0.65;
+            % disp('Occupied cells:');
+            % disp(occupiedCells);
             replan = any(occupiedCells);
+            %disp(replan)
         end
         function reached = reachedGoal(obj)
             if isempty(obj.currentPose) || isempty(obj.goal)
@@ -406,6 +396,64 @@ classdef Robot < handle
             %disp('Distance');
             %disp(dist);
             reached = dist < 0.2;
+        end
+        function delete(obj)
+            disp('Cleaning up Robot object...');
+
+            try
+                if ~isempty(obj.controlTimer) && isvalid(obj.controlTimer)
+                stop(obj.controlTimer);
+                delete(obj.controlTimer);
+            
+                end
+            catch e
+                disp(e.message);
+            end
+            try
+                if ~isempty(obj.poseTimer) && isvalid(obj.poseTimer)
+                    stop(obj.poseTimer);
+                    delete(obj.poseTimer);
+                end
+            catch e
+                disp(e.message);
+            end
+            try
+                if ~isempty(obj.ekf.timer) && isvalid(obj.ekf.timer)
+                    stop(obj.ekf.timer);
+                    delete(obj.ekf.timer);
+                end
+            catch e
+                disp(e.message);
+            end
+            
+            % Clean up subscribers
+            if ~isempty(obj.frontLidarSub)
+                clear obj.frontLidarSub;
+            end
+            if ~isempty(obj.backLidarSub)
+                clear obj.backLidarSub;
+            end
+            if ~isempty(obj.goalSub)
+                clear obj.goalSub;
+            end
+            
+            % Clean up publishers
+            if ~isempty(obj.robotMapPub)
+                clear obj.robotMapPub;
+            end
+            if ~isempty(obj.currentPosePub)
+                clear obj.currentPosePub;
+            end
+            if ~isempty(obj.pathPub)
+                clear obj.pathPub;
+            end
+            
+            % Clean up node last
+            if ~isempty(obj.node)
+                delete(obj.node);
+            end
+            
+            disp('Robot cleanup complete.');
         end
     end
 end
