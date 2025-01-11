@@ -54,7 +54,7 @@ classdef Robot < handle
             
             obj.planner = plannerAStarGrid(obj.robotMap);
             obj.controller = DiffDrivePathController(obj.node);
-            timeStep = 0.1;
+            timeStep = 0.3;
             obj.ekf = SensorFusionEKF(5.975, 16.975, timeStep);  % Initialize sensor fusion EKF
             obj.ekf.start();
             % Get current state from EKF using getState()
@@ -65,11 +65,11 @@ classdef Robot < handle
             
             % Lidar Subscriber
             %obj.frontLidarSub = ros2subscriber(obj.node, '/front_2d_lidar/scan', 'sensor_msgs/LaserScan');
-            obj.frontLidarSub = ros2subscriber(obj.node, '/front_2d_lidar/scan', 'sensor_msgs/LaserScan', @obj.lidarCallback);
+            obj.frontLidarSub = ros2subscriber(obj.node, '/front_2d_lidar/scan', 'sensor_msgs/LaserScan');%, @obj.lidarCallback);
             %obj.backLidarSub = ros2subscriber(obj.node, '/back_2d_lidar/scan', 'sensor_msgs/LaserScan');
 
             % Subscribe to pose updates from sensor fusion
-            % addlistener(obj.ekf, 'PoseUpdated', @(~, ~)obj.updateMap());
+            addlistener(obj.ekf, 'PoseUpdated', @(~, ~)obj.updateMap());
 
             obj.goalSub = ros2subscriber(obj.node, '/goal_pose', 'geometry_msgs/PoseStamped', @obj.goalCallback);
             
@@ -134,6 +134,7 @@ classdef Robot < handle
                 % Stop the robot until we calculate new path
                 obj.controller.sendVelocityCommand(0, 0);
                 stop(obj.controlTimer);
+                obj.ekf.trajectoryAnalysis(obj.currentPath);
             end
             % Start navigation to new goal
             obj.navigate(newGoal);
@@ -199,28 +200,33 @@ classdef Robot < handle
                 end
             end
         end
-        function lidarCallback(obj, msg)
+        function updateMap(obj)
             % Lidar insertion callback triggered by pose update
-            %frontMsg = receive(obj.frontLidarSub, 0.01); % Grab latest lidar scan
-            %backMsg = receive(obj.backLidarSub, 1);
-            % if ~isempty(frontMsg)
-            % Get current state from EKF using getState()
             obj.currentPose = obj.ekf.getState();
-            obj.insertScans2Map(msg, true);
-            %obj.insertScans2Map(backMsg, false);
-
-            testmsg = ros2message('nav_msgs/OccupancyGrid');
-            testmsg.header.frame_id = 'map';
-            testmsg.info.width = uint32(obj.robotMap.GridSize(1));
-            testmsg.info.height = uint32(obj.robotMap.GridSize(2));
-            testmsg.info.resolution = single(1/obj.robotMap.Resolution);
-            
-            % Flatten occupancy data (1D array required for ROS)
-            testmsg.data = int8(reshape(occupancyMatrix(obj.robotMap)*100, [], 1));
-            
-            % Publish the map
-            send(obj.robotMapPub, testmsg);
-            % end
+            %backMsg = receive(obj.backLidarSub, 1);
+            try
+                frontMsg = receive(obj.frontLidarSub, 0.05); % Grab latest lidar scan
+                if ~isempty(frontMsg)
+                    % Get current state from EKF using getState()
+                    %obj.currentPose = obj.ekf.getState();
+                    obj.insertScans2Map(frontMsg, true);
+                    %obj.insertScans2Map(backMsg, false);
+        
+                    testmsg = ros2message('nav_msgs/OccupancyGrid');
+                    testmsg.header.frame_id = 'map';
+                    testmsg.info.width = uint32(obj.robotMap.GridSize(1));
+                    testmsg.info.height = uint32(obj.robotMap.GridSize(2));
+                    testmsg.info.resolution = single(1/obj.robotMap.Resolution);
+                    
+                    % Flatten occupancy data (1D array required for ROS)
+                    testmsg.data = int8(reshape(occupancyMatrix(obj.robotMap)*100, [], 1));
+                    
+                    % Publish the map
+                    send(obj.robotMapPub, testmsg);
+                end
+            catch e
+                 %disp(e.message);
+            end
         end
         
         function obj = navigate(obj, goal)
@@ -233,7 +239,7 @@ classdef Robot < handle
             % Start real-time control
             obj.isNavigating = true;
 
-          
+            obj.ekf.startLogging();
             start(obj.controlTimer);
            
         end
@@ -243,10 +249,11 @@ classdef Robot < handle
             try 
                 % Check if we've reached the goal
                 if obj.reachedGoal()
-                    disp('Reached Goal!')
+                    disp('Reached Goal!');
                     obj.isNavigating = false;
                     obj.controller.sendVelocityCommand(0, 0);
                     stop(obj.controlTimer);
+                    obj.ekf.trajectoryAnalysis(obj.currentPath);
                     return
                 end
                 
@@ -255,6 +262,8 @@ classdef Robot < handle
                     disp('Replanning path...');
                     obj.currentPath = obj.planPath();
                 end
+
+                %obj.currentPose = obj.ekf.getState();
                 
                 % Compute and send velocity commands
                 [v, omega] = obj.controller.computeVelocityCommands(obj.currentPose, obj.currentPath);

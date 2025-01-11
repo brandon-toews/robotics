@@ -137,55 +137,55 @@ classdef SensorFusionEKF < handle
             end
 
             if nargin > 1 && ~isempty(plannedPath)
-                % Analyze path deviation
-                % For each point in the ground truth, find closest point on planned path
-                path_errors = zeros(size(world_ground, 1), 1);
-                for i = 1:size(world_ground, 1)
-                    % Calculate distances to all points on planned path
-                    distances = sqrt(sum((plannedPath - world_ground(i,:)).^2, 2));
-                    % Find minimum distance (closest point)
-                    path_errors(i) = min(distances);
-                end
-                
-                % Calculate path error statistics
-                mean_path_error = mean(path_errors);
-                median_path_error = median(path_errors);
-                max_path_error = max(path_errors);
-                std_path_error = std(path_errors);
-                rms_path_error = rms(path_errors);
-                
-                % Create error distribution subplot
-                figure('Name', 'Path Error Analysis');
-                subplot(2,1,1);
-                histogram(path_errors, 30, 'Normalization', 'probability');
-                title('Path Error Distribution');
-                xlabel('Error Distance (m)');
-                ylabel('Probability');
-                grid on;
-                
-                % Plot error over time
-                subplot(2,1,2);
-                plot(1:length(path_errors), path_errors, 'b-');
-                title('Path Error Over Time');
-                xlabel('Sample Number');
-                ylabel('Error Distance (m)');
-                grid on;
-                
-                % Print statistics
-                disp('Path Error Statistics:');
-                disp(['Mean Error: ', num2str(mean_path_error), ' m']);
-                disp(['Median Error: ', num2str(median_path_error), ' m']);
-                disp(['Max Error: ', num2str(max_path_error), ' m']);
-                disp(['Standard Deviation: ', num2str(std_path_error), ' m']);
-                disp(['RMS Error: ', num2str(rms_path_error), ' m']);
-                
-                % Calculate what percentage of time robot was within different error thresholds
-                error_thresholds = [0.1, 0.2, 0.5, 1.0]; % meters
-                for threshold = error_thresholds
-                    within_threshold = sum(path_errors < threshold) / length(path_errors) * 100;
-                    disp(['Time within ', num2str(threshold), 'm: ', num2str(within_threshold), '%']);
-                end
-            end
+        % Analyze path deviation
+        % For each point in the ground truth, find closest point on planned path
+        path_errors = zeros(size(world_ground, 1), 1);
+        for i = 1:size(world_ground, 1)
+            % Calculate distances to all points on planned path
+            distances = sqrt(sum((plannedPath - world_ground(i,:)).^2, 2));
+            % Find minimum distance (closest point)
+            path_errors(i) = min(distances);
+        end
+        
+        % Calculate path error statistics
+        mean_path_error = mean(path_errors);
+        median_path_error = median(path_errors);
+        max_path_error = max(path_errors);
+        std_path_error = std(path_errors);
+        rms_path_error = rms(path_errors);
+        
+        % Create error distribution subplot
+        figure('Name', 'Path Error Analysis');
+        subplot(2,1,1);
+        histogram(path_errors, 30, 'Normalization', 'probability');
+        title('Path Error Distribution');
+        xlabel('Error Distance (m)');
+        ylabel('Probability');
+        grid on;
+        
+        % Plot error over time
+        subplot(2,1,2);
+        plot(1:length(path_errors), path_errors, 'b-');
+        title('Path Error Over Time');
+        xlabel('Sample Number');
+        ylabel('Error Distance (m)');
+        grid on;
+        
+        % Print statistics
+        disp('Path Error Statistics:');
+        disp(['Mean Error: ', num2str(mean_path_error), ' m']);
+        disp(['Median Error: ', num2str(median_path_error), ' m']);
+        disp(['Max Error: ', num2str(max_path_error), ' m']);
+        disp(['Standard Deviation: ', num2str(std_path_error), ' m']);
+        disp(['RMS Error: ', num2str(rms_path_error), ' m']);
+        
+        % Calculate what percentage of time robot was within different error thresholds
+        error_thresholds = [0.1, 0.2, 0.5, 1.0]; % meters
+        for threshold = error_thresholds
+            within_threshold = sum(path_errors < threshold) / length(path_errors) * 100;
+            disp(['Time within ', num2str(threshold), 'm: ', num2str(within_threshold), '%']);
+        end
+    end
             
             % Create plot
             figure('Name', 'Robot Trajectory Analysis');
