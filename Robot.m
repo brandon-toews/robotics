@@ -1,29 +1,33 @@
-
 classdef Robot < handle
     properties
-        fullMap
-        robotMap
-        currentPose
-        goal
-        currentPath
-        node
-        frontLidarSub
-        backLidarSub
-        ekf
-        planner
-        controller
-        robotMapPub
-        currentPosePub
+        robotMap % internal robot map
+        currentPose % current pose
+        goal % goal to path plan and navigate to
+        currentPath %current calculated path
+        node % ros2 node for robot object
+        frontLidarSub %ros2 subscriber
+        backLidarSub %ros2 subscriber
+        stateEstimator % State estimation object
+        estimationMode % what type of state estimation
+        planner % a star
+        controller % differential drive controller send inputs to robot in Isaac sim
+        robotMapPub % map publisher to see in RViz2
+        currentPosePub % pose publisher RViz2
         % Path publisher
-        pathPub
-        resolution
+        pathPub % planned path publisher for RViz2
+        resolution % resolution of occupancy map
         controlTimer    % Timer for real-time control
         isNavigating   % Flag to track navigation state
-        poseTimer
-        goalSub
+        poseTimer % timer to update pose info
+        goalSub % goal publisher
     end
     methods
-        function obj = Robot(map)
+        function obj = Robot(map, estimationMode)
+            if nargin < 2
+                estimationMode = 'fusion';  % Default to sensor fusion
+            end
+
+            obj.estimationMode = estimationMode;
             mapSize = map.GridSize;
             obj.resolution = 1/map.Resolution;
             obj.node = ros2node('robot_explorer');
@@ -43,7 +47,7 @@ classdef Robot < handle
 
             % Initialize dynamic map (same size and resolution as ground truth)
             obj.robotMap = occupancyMap(unknownMap, 1/obj.resolution);
-            %inflate(obj.robotMap,3)
+            
 
             % Publisher for dynamic map
             obj.robotMapPub = ros2publisher(obj.node, '/updated_map', 'nav_msgs/OccupancyGrid');
@@ -55,21 +59,21 @@ classdef Robot < handle
             obj.planner = plannerAStarGrid(obj.robotMap);
             obj.controller = DiffDrivePathController(obj.node);
             timeStep = 0.3;
-            obj.ekf = SensorFusionEKF(5.975, 16.975, timeStep);  % Initialize sensor fusion EKF
-            obj.ekf.start();
-            % Get current state from EKF using getState()
-            obj.currentPose = obj.ekf.getState();
+            obj.stateEstimator = StateEstimator(estimationMode, 5.975, 16.975, timeStep);
+            %obj.stateEstimator.start();
+            
+            % Get current state
+            obj.currentPose = obj.stateEstimator.getState();
 
+            % current pose publisher for displaying in RViz2
             obj.currentPosePub = ros2publisher(obj.node, '/robot_pose', 'geometry_msgs/PoseStamped');
-            %obj.lidarSub = ros2subscriber(obj.node, '/front_2d_lidar/scan', @obj.lidarCallback);
             
             % Lidar Subscriber
-            %obj.frontLidarSub = ros2subscriber(obj.node, '/front_2d_lidar/scan', 'sensor_msgs/LaserScan');
-            obj.frontLidarSub = ros2subscriber(obj.node, '/front_2d_lidar/scan', 'sensor_msgs/LaserScan');%, @obj.lidarCallback);
+            obj.frontLidarSub = ros2subscriber(obj.node, '/front_2d_lidar/scan', 'sensor_msgs/LaserScan');
             %obj.backLidarSub = ros2subscriber(obj.node, '/back_2d_lidar/scan', 'sensor_msgs/LaserScan');
 
             % Subscribe to pose updates from sensor fusion
-            addlistener(obj.ekf, 'PoseUpdated', @(~, ~)obj.updateMap());
+            addlistener(obj.stateEstimator, 'PoseUpdated', @(~, ~)obj.updateMap());
 
             obj.goalSub = ros2subscriber(obj.node, '/goal_pose', 'geometry_msgs/PoseStamped', @obj.goalCallback);
             
@@ -134,11 +138,12 @@ classdef Robot < handle
                 % Stop the robot until we calculate new path
                 obj.controller.sendVelocityCommand(0, 0);
                 stop(obj.controlTimer);
-                obj.ekf.trajectoryAnalysis(obj.currentPath);
+                obj.stateEstimator.trajectoryAnalysis(obj.currentPath);
             end
             % Start navigation to new goal
             obj.navigate(newGoal);
         end
+        % Insert lidar scan into map to update with obstacles
         function insertScans2Map(obj, scans, isFront)
             if ~isempty(scans)
                 % Get current occupancy values
@@ -180,14 +185,6 @@ classdef Robot < handle
                     % Insert LIDAR data using the transformed scan
                     insertRay(newMap, globalPose, transformedScan, maxRange);
                     newOccGrid = occupancyMatrix(newMap);
-                    % Define the inflation radius (in cells)
-                    %inflationRadius = 2;
-
-                    % Create a structuring element (disk-shaped kernel)
-                    %se = strel('disk', inflationRadius);
-
-                    % Inflate the occupancy grid using imdilate
-                    %inflatedMatrix = imdilate(newOccGrid, se);
 
                     % Merge front scan with current map
                     currentOccGrid = max(currentOccGrid, newOccGrid);
@@ -202,7 +199,7 @@ classdef Robot < handle
         end
         function updateMap(obj)
             % Lidar insertion callback triggered by pose update
-            obj.currentPose = obj.ekf.getState();
+            obj.currentPose = obj.stateEstimator.getState();
             %backMsg = receive(obj.backLidarSub, 1);
             try
                 frontMsg = receive(obj.frontLidarSub, 0.05); % Grab latest lidar scan
@@ -228,46 +225,66 @@ classdef Robot < handle
                  %disp(e.message);
             end
         end
+
+        % Add this method to your Robot class
+        function savePath(~, path)
+            % Save planned path to CSV
+            filename = 'planned_path.csv';
+            fileID = fopen(filename, 'w');
+            fprintf(fileID, 'x,y\n');  % Header
+            for i = 1:size(path, 1)
+                fprintf(fileID, '%f,%f\n', path(i,1), path(i,2));
+            end
+            fclose(fileID);
+        end
         
         function obj = navigate(obj, goal)
             obj.goal = goal;
             disp('Planning initial path...');
             obj.currentPath = obj.planPath();
+
+            % Save the planned path
+            obj.savePath(obj.currentPath);
+
             disp(['Path has ', num2str(size(obj.currentPath, 1)), ' waypoints']);
             obj.controller.resetPath();
             
             % Start real-time control
             obj.isNavigating = true;
 
-            obj.ekf.startLogging();
+            obj.stateEstimator.startLogging();
             start(obj.controlTimer);
            
         end
         
         function controlLoop(obj)
-         
-            try 
-                % Check if we've reached the goal
+            try
                 if obj.reachedGoal()
                     disp('Reached Goal!');
                     obj.isNavigating = false;
                     obj.controller.sendVelocityCommand(0, 0);
                     stop(obj.controlTimer);
-                    obj.ekf.trajectoryAnalysis(obj.currentPath);
+                    % Analyze trajectory with current estimation mode
+                    obj.stateEstimator.trajectoryAnalysis(obj.currentPath);
                     return
                 end
                 
-                % Check for replanning (maybe do this less frequently)
                 if obj.needsReplanning()
                     disp('Replanning path...');
                     obj.currentPath = obj.planPath();
                 end
-
-                %obj.currentPose = obj.ekf.getState();
+                
+                % Get current state from estimator
+                obj.currentPose = obj.stateEstimator.getState();
                 
                 % Compute and send velocity commands
                 [v, omega] = obj.controller.computeVelocityCommands(obj.currentPose, obj.currentPath);
                 obj.controller.sendVelocityCommand(v, omega);
+                
+                % Update velocity command for dead reckoning if needed
+                if strcmp(obj.estimationMode, 'DeadReckoning')
+                    obj.stateEstimator.updateVelocityCommand(v, omega);
+                end
                 
             catch e
                 disp('Error in control loop:');
@@ -289,7 +306,7 @@ classdef Robot < handle
                 % disp(start);
                 % disp(finish);
                 
-                % Use MATLAB's built-in raycast for cell interpolation
+                % Use raycast for cell interpolation
                 segmentCells = raycast(obj.robotMap, start, finish);
 
                 cells = [cells; segmentCells];
@@ -406,6 +423,8 @@ classdef Robot < handle
             %disp(dist);
             reached = dist < 0.2;
         end
+        
+        % Delete method for cleaning up timers and ros2 stuff
         function delete(obj)
             disp('Cleaning up Robot object...');
 
@@ -427,9 +446,9 @@ classdef Robot < handle
                 disp(e.message);
             end
             try
-                if ~isempty(obj.ekf.timer) && isvalid(obj.ekf.timer)
-                    stop(obj.ekf.timer);
-                    delete(obj.ekf.timer);
+                if ~isempty(obj.stateEstimator.timer) && isvalid(obj.stateEstimator.timer)
+                    stop(obj.stateEstimator.timer);
+                    delete(obj.stateEstimator.timer);
                 end
             catch e
                 disp(e.message);

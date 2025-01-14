@@ -1,3 +1,5 @@
+% drive cript for sending commands to controller node in Isaac sim through
+% ros2 bridge
 classdef DiffDrivePathController < handle
     properties
         maxLinearVelocity = 0.5    % m/s
@@ -89,6 +91,7 @@ classdef DiffDrivePathController < handle
             end
         end
         
+        % send velocities to controller
         function sendVelocityCommand(obj, v, omega)
             msg = ros2message('geometry_msgs/Twist');
             msg.linear.x = v;
