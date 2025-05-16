@@ -49,13 +49,13 @@ disp(['resolution: ' num2str(resolution)]);
 goal = [8, 18];  % Example goal position
 
 % Create robots with different estimation modes
-%fusionRobot = Robot(map, 'Fusion');
-odomRobot = Robot(map, 'OdomOnly');
+fusionRobot = Robot(map, 'Fusion');
+%odomRobot = Robot(map, 'OdomOnly');
 %deadReckRobot = Robot(map, 'DeadReckoning');
 
 
-%fusionRobot.navigate(goal);
-odomRobot.navigate(goal);
+fusionRobot.navigate(goal);
+%odomRobot.navigate(goal);
 %deadReckRobot.navigate(goal);
 
 disp('Robot is running. Send goals through ROS2 topic /goal_pose');
@@ -66,8 +66,8 @@ input('');
 disp('Cleaning up...');
 
 % Delete the robot object
-%delete(fusionRobot);
-delete(odomRobot);
+delete(fusionRobot);
+%delete(odomRobot);
 %delete(deadReckRobot);
 
 delete(node);
